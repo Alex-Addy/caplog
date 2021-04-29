@@ -5,6 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use log;
 
+mod stable_list;
+use stable_list::StableList;
+
 lazy_static! {
     static ref _CAPTURE_LOG: Box<Caplog> = {
         let handler = Box::new(Caplog {
@@ -44,12 +47,12 @@ struct Record {
 }
 
 struct CaplogInner {
-    logs: Vec<Record>,
+    logs: StableList<Record>,
 }
 
 impl CaplogInner {
     fn new() -> Self {
-        Self { logs: Vec::new() }
+        Self { logs: StableList::new() }
     }
 }
 
@@ -59,18 +62,6 @@ pub struct CaplogHandle {
 }
 
 impl CaplogHandle {
-    pub fn any_msg_contains(&self, sub_string: &str) -> bool {
-        let lock = _CAPTURE_LOG.inner.lock().unwrap();
-        let msg_range = if let Some(end) = self.end_idx {
-            self.start_idx..end
-        } else {
-            self.start_idx..lock.logs.len()
-        };
-        lock.logs[msg_range].iter().any(|rec| rec.msg.contains(sub_string))
-    }
-    pub fn stop_recording(&mut self) {
-        self.end_idx = Some(_CAPTURE_LOG.inner.lock().unwrap().logs.len());
-    }
 }
 
 pub fn get_handle() -> CaplogHandle {
@@ -85,15 +76,15 @@ mod tests {
     use super::*;
     use log::info;
 
-    #[test]
-    fn simple_contains() {
-        let mut handle = get_handle();
-        let present = "present msg";
-        let not_present = "not present in messages";
-        info!("{}", present);
-        handle.stop_recording();
-        info!("{}", not_present);
-        assert!(handle.any_msg_contains(present));
-        assert!(!handle.any_msg_contains(not_present));
-    }
+    //#[test]
+    //fn simple_contains() {
+    //    let mut handle = get_handle();
+    //    let present = "present msg";
+    //    let not_present = "not present in messages";
+    //    info!("{}", present);
+    //    handle.stop_recording();
+    //    info!("{}", not_present);
+    //    assert!(handle.any_msg_contains(present));
+    //    assert!(!handle.any_msg_contains(not_present));
+    //}
 }
