@@ -6,13 +6,15 @@ use std::sync::{RwLock, atomic::{AtomicU32, Ordering}};
 const BLOCK_SIZE: usize = 128;
 
 pub struct StableList<T> {
-    // TODO check that linkedlist is stable upon push
-    list_lock: RwLock<LinkedList<[UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>>,
+    list_lock: RwLock<LinkedList<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>>,
     /// Index just past the last initialized item in the StableList
     ///
     /// The item pointed to by this idx is uninitialized or may not exist.
     last_global_idx: AtomicU32,
 }
+
+unsafe impl<T> Send for StableList<T> where T: Send {}
+unsafe impl<T> Sync for StableList<T> {}
 
 impl<T> StableList<T> {
     pub fn new() -> Self {
@@ -29,7 +31,7 @@ impl<T> StableList<T> {
        };
        // make sure to get the most recent value, don't move this before the lock
        let global_idx = self.last_global_idx.load(Ordering::SeqCst) as usize;
-       if global_idx != u32::MAX as usize {
+       if global_idx == u32::MAX as usize {
            panic!("list is full, cannot index past 2^32");
        }
        if global_idx % BLOCK_SIZE == 0 {
@@ -37,10 +39,10 @@ impl<T> StableList<T> {
             // Safety: We are telling the compiler to assume initialization of the MaybeUninit values
             // *not* the T inside them. MaybeUninit requires no initialization.
             let block: [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
-            list.push_back(block);
+            list.push_back(Box::into_raw(Box::new(block)));
        }
        let last_block = list.iter_mut().last().expect("no block in list even though we tried to add one");
-       last_block[global_idx % BLOCK_SIZE] = UnsafeCell::new(MaybeUninit::new(item));
+       unsafe { *(**last_block)[global_idx % BLOCK_SIZE].get() = MaybeUninit::new(item) };
        // Safety: only modify last_global_idx while we have the lock
        self.last_global_idx.fetch_add(1, Ordering::SeqCst);
     }
@@ -49,9 +51,9 @@ impl<T> StableList<T> {
        self.last_global_idx.load(Ordering::SeqCst) as usize
     }
 
-    unsafe fn get_chunk(&self, idx: usize) -> Option<&[UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
+    unsafe fn get_chunk(&self, idx: usize) -> Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
         match self.list_lock.read() {
-            Ok(lock) => lock.iter().take(idx).last(),
+            Ok(lock) => lock.iter().take(idx).last().map(|&val| val),
             Err(_) => panic!("StableList's internal mutex has been poisoned"),
         }
     }
@@ -65,7 +67,7 @@ impl<T> StableList<T> {
             // Safety: All values before last_global_idx are guaranteed to be initialized
             list.iter().take(idx / BLOCK_SIZE + 1)
                 .last()
-                .map(|ch| unsafe { &*(*ch[idx % BLOCK_SIZE].get()).as_ptr()} )
+                .map(|ch| unsafe { &*(*(&**ch)[idx % BLOCK_SIZE].get()).as_ptr() } )
         } else {
             None
         }
@@ -80,7 +82,7 @@ impl<T> StableList<T> {
         StableListIterator {
             global_idx: global_idx,
             chunk_idx: global_idx % BLOCK_SIZE,
-            chunk: list.iter().last(),
+            chunk: list.iter().last().map(|&val| val),
             list: self,
         }
     }
@@ -92,7 +94,7 @@ impl<T> StableList<T> {
 struct StableListIterator<'a, T: 'a> {
     global_idx: usize,
     chunk_idx: usize,
-    chunk: Option<&'a [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>,
+    chunk: Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>,
     list: &'a StableList<T>,
 }
 
@@ -115,13 +117,14 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
                     self.chunk_idx = 0;
                     self.global_idx += 1;
                     self.chunk = Some(chunk);
-                    return self.chunk.map(|ch| unsafe { &*(*ch[self.chunk_idx].get()).as_ptr()} )
                 },
             }
+        } else {
+            self.chunk_idx += 1;
+            self.global_idx += 1;
         }
-        self.chunk_idx += 1;
-        self.global_idx += 1;
-        return self.chunk.map(|ch| unsafe { &*(*ch[self.chunk_idx].get()).as_ptr()} )
+        let val = self.chunk.map(|ch| unsafe { (&*ch)[self.chunk_idx].get().as_ref().unwrap() } );
+        return val.map(|v| unsafe { &*v.as_ptr().as_ref().unwrap() } );
     }
 }
 
