@@ -75,7 +75,7 @@ impl<T> StableList<T> {
         }
     }
 
-    fn iter(&self) -> StableListIterator<'_, T> {
+    pub fn iter(&self) -> StableListIterator<'_, T> {
         let list = match self.list_lock.read() {
            Ok(lock) => lock,
            Err(_) => panic!("StableList's internal mutex has been poisoned"),
@@ -149,6 +149,7 @@ mod test {
         assert_eq!(list.get(0), Some(&1002));
     }
 
+    #[test]
     fn push_and_check_full_chunk() {
         let list = StableList::new();
         assert_eq!(list.get(0), None);
@@ -160,6 +161,7 @@ mod test {
         }
     }
 
+    #[test]
     fn push_and_check_multiple_chunks() {
         let list = StableList::new();
         assert_eq!(list.get(0), None);
@@ -201,6 +203,21 @@ mod test {
         list.push(1000);
         assert_eq!(list.len(), 1);
         assert_eq!(iter.next(), Some(&1000));
+    }
+
+    #[test]
+    // Test that handing out multiple iterators at the same time works.
+    fn multiple_iterators() {
+        let list = StableList::<i32>::new();
+        let mut iter_1 = list.iter();
+        let mut iter_2 = list.iter();
+        for i in 100..200 {
+            list.push(i);
+            let a = iter_1.next();
+            let b = iter_2.next();
+            assert_eq!(Some(&i), a);
+            assert_eq!(Some(&i), b);
+        }
     }
 
     //proptest! {
