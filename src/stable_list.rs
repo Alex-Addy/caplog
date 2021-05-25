@@ -20,7 +20,6 @@ impl<T> StableList<T> {
     pub fn new() -> Self {
         let mut list: LinkedList<*const _> = LinkedList::new();
         let block: [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
-        list.push_back(Box::into_raw(Box::new(block)));
         StableList{
             list_lock: RwLock::new(list),
             last_global_idx: AtomicU32::new(0),
@@ -37,7 +36,7 @@ impl<T> StableList<T> {
        if global_idx == u32::MAX as usize {
            panic!("list is full, cannot index past 2^32");
        }
-       if global_idx % BLOCK_SIZE == 0 && global_idx != 0 {
+       if global_idx % BLOCK_SIZE == 0 {
             // we have all full blocks and have to add a new one
             // Safety: We are telling the compiler to assume initialization of the MaybeUninit values
             // *not* the T inside them. MaybeUninit requires no initialization.
@@ -84,9 +83,8 @@ impl<T> StableList<T> {
         let global_idx = self.last_global_idx.load(Ordering::SeqCst) as usize;
         StableListIterator {
             global_idx: global_idx,
-            chunk: *list.iter().last().unwrap(),
+            chunk: list.iter().last().map_or(std::ptr::null(), |v| *v),
             list: self,
-            first_item_given: false,
         }
     }
 }
@@ -98,17 +96,20 @@ struct StableListIterator<'a, T: 'a> {
     global_idx: usize,
     chunk: *const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE],
     list: &'a StableList<T>,
-    first_item_given: bool,
 }
 
 impl<'a, T: std::fmt::Debug> Iterator for StableListIterator<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.first_item_given && self.list.len() == 0 {
-            return None;
+        if self.chunk.is_null() {
+            match unsafe { self.list.get_chunk(0) } {
+                Some(next_chunk) => self.chunk = next_chunk,
+                None => return None,
+            }
+            let val = unsafe { (&*self.chunk)[self.global_idx % BLOCK_SIZE].get().as_ref().unwrap() };
+            return dbg!(Some(unsafe { &*val.as_ptr().as_ref().unwrap() }));
         }
-        dbg!(self.global_idx);
         if self.global_idx + 1 == self.list.len() {
             // no values to return right now
             return None;
@@ -126,10 +127,8 @@ impl<'a, T: std::fmt::Debug> Iterator for StableListIterator<'a, T> {
                     self.chunk = chunk;
                 },
             }
-        } else if self.first_item_given {
-            self.global_idx += 1;
         } else {
-            self.first_item_given = true;
+            self.global_idx += 1;
         }
         let val = unsafe { (&*self.chunk)[self.global_idx % BLOCK_SIZE].get().as_ref().unwrap() };
         return dbg!(Some(unsafe { &*val.as_ptr().as_ref().unwrap() }));
