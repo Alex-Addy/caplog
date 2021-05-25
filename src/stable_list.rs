@@ -18,8 +18,11 @@ unsafe impl<T> Sync for StableList<T> {}
 
 impl<T> StableList<T> {
     pub fn new() -> Self {
+        let mut list: LinkedList<*const _> = LinkedList::new();
+        let block: [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+        list.push_back(Box::into_raw(Box::new(block)));
         StableList{
-            list_lock: RwLock::new(LinkedList::new()),
+            list_lock: RwLock::new(list),
             last_global_idx: AtomicU32::new(0),
         }
     }
@@ -34,7 +37,7 @@ impl<T> StableList<T> {
        if global_idx == u32::MAX as usize {
            panic!("list is full, cannot index past 2^32");
        }
-       if global_idx % BLOCK_SIZE == 0 {
+       if global_idx % BLOCK_SIZE == 0 && global_idx != 0 {
             // we have all full blocks and have to add a new one
             // Safety: We are telling the compiler to assume initialization of the MaybeUninit values
             // *not* the T inside them. MaybeUninit requires no initialization.
@@ -52,8 +55,9 @@ impl<T> StableList<T> {
     }
 
     unsafe fn get_chunk(&self, idx: usize) -> Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
+        println!("stable: fetching {} chunk", idx);
         match self.list_lock.read() {
-            Ok(lock) => lock.iter().take(idx).last().map(|&val| val),
+            Ok(lock) => lock.iter().nth(idx).map(|&val| val),
             Err(_) => panic!("StableList's internal mutex has been poisoned"),
         }
     }
@@ -65,8 +69,7 @@ impl<T> StableList<T> {
                Err(_) => panic!("StableList's internal mutex has been poisoned"),
             };
             // Safety: All values before last_global_idx are guaranteed to be initialized
-            list.iter().take(idx / BLOCK_SIZE + 1)
-                .last()
+            list.iter().nth(idx / BLOCK_SIZE)
                 .map(|ch| unsafe { &*(*(&**ch)[idx % BLOCK_SIZE].get()).as_ptr() } )
         } else {
             None
@@ -81,9 +84,9 @@ impl<T> StableList<T> {
         let global_idx = self.last_global_idx.load(Ordering::SeqCst) as usize;
         StableListIterator {
             global_idx: global_idx,
-            chunk_idx: global_idx % BLOCK_SIZE,
-            chunk: list.iter().last().map(|&val| val),
+            chunk: *list.iter().last().unwrap(),
             list: self,
+            first_item_given: false,
         }
     }
 }
@@ -93,38 +96,43 @@ impl<T> StableList<T> {
 
 struct StableListIterator<'a, T: 'a> {
     global_idx: usize,
-    chunk_idx: usize,
-    chunk: Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>,
+    chunk: *const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE],
     list: &'a StableList<T>,
+    first_item_given: bool,
 }
 
-impl<'a, T> Iterator for StableListIterator<'a, T> {
+impl<'a, T: std::fmt::Debug> Iterator for StableListIterator<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.global_idx == self.list.last_global_idx.load(Ordering::SeqCst) as usize {
-            // no more values to return
+        if !self.first_item_given && self.list.len() == 0 {
+            return None;
+        }
+        dbg!(self.global_idx);
+        if self.global_idx + 1 == self.list.len() {
+            // no values to return right now
             return None;
         }
 
-        if self.chunk_idx + 1 == BLOCK_SIZE {
+        if self.global_idx % BLOCK_SIZE + 1 == BLOCK_SIZE {
             // this would be a lot simpler if LinkedList exposed a way to hold a reference to a
             // node, the proposed cursor API might be what is necessary: https://github.com/rust-lang/rust/issues/58533
             // TODO safety
             match unsafe { self.list.get_chunk(self.global_idx / BLOCK_SIZE + 1) } {
                 None => return None,
                 Some(chunk) => {
-                    self.chunk_idx = 0;
+                    dbg!(chunk);
                     self.global_idx += 1;
-                    self.chunk = Some(chunk);
+                    self.chunk = chunk;
                 },
             }
-        } else {
-            self.chunk_idx += 1;
+        } else if self.first_item_given {
             self.global_idx += 1;
+        } else {
+            self.first_item_given = true;
         }
-        let val = self.chunk.map(|ch| unsafe { (&*ch)[self.chunk_idx].get().as_ref().unwrap() } );
-        return val.map(|v| unsafe { &*v.as_ptr().as_ref().unwrap() } );
+        let val = unsafe { (&*self.chunk)[self.global_idx % BLOCK_SIZE].get().as_ref().unwrap() };
+        return dbg!(Some(unsafe { &*val.as_ptr().as_ref().unwrap() }));
     }
 }
 
@@ -138,8 +146,30 @@ mod test {
     fn push_and_check_single_item() {
         let list = StableList::new();
         assert_eq!(list.get(0), None);
-        list.push(0xABABi32);
-        assert_eq!(list.get(0), Some(&0xABAB));
+        list.push(1002);
+        assert_eq!(list.get(0), Some(&1002));
+    }
+
+    fn push_and_check_full_chunk() {
+        let list = StableList::new();
+        assert_eq!(list.get(0), None);
+        for i in 0..BLOCK_SIZE {
+            list.push(100 + i);
+        }
+        for i in 0..BLOCK_SIZE {
+            assert_eq!(list.get(i), Some(&(100+i)));
+        }
+    }
+
+    fn push_and_check_multiple_chunks() {
+        let list = StableList::new();
+        assert_eq!(list.get(0), None);
+        for i in 0..(BLOCK_SIZE*2) {
+            list.push(100 + i);
+        }
+        for i in 0..(BLOCK_SIZE*2) {
+            assert_eq!(list.get(i), Some(&(100+i)));
+        }
     }
 
     #[test]
@@ -147,15 +177,18 @@ mod test {
     fn populate_and_iterate_simple() {
         let list = StableList::new();
         let mut iter = list.iter();
-        for i in 0..(BLOCK_SIZE*5) {
-            list.push(i);
+        let arb_values = BLOCK_SIZE * 2 + 1;
+        for i in 0..(arb_values) {
+            list.push(i * 10);
         }
-        let mut values = 0;
-        for (exp, val) in (0..).zip(list.iter()) {
-            assert_eq!(exp, *val);
-            values += 1;
+        assert_eq!(list.len(), arb_values);
+        let mut values_found = 0;
+        for (exp, val) in (0..).zip(iter) {
+            dbg!((exp*10, val, list.get(exp)));
+            assert_eq!(exp*10, *val);
+            values_found += 1;
         }
-        assert_eq!(values, BLOCK_SIZE*5);
+        assert_eq!(values_found, arb_values);
     }
 
     #[test]
@@ -164,9 +197,11 @@ mod test {
     fn iterator_resumption() {
         let mut list = StableList::new();
         let mut iter = list.iter();
+        assert_eq!(list.len(), 0);
         assert_eq!(iter.next(), None);
-        list.push(0xBEEF);
-        assert_eq!(iter.next(), Some(&0xBEEF));
+        list.push(1000);
+        assert_eq!(list.len(), 1);
+        assert_eq!(iter.next(), Some(&1000));
     }
 
     //proptest! {
