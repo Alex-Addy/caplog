@@ -3,8 +3,6 @@ extern crate lazy_static;
 
 use std::sync::Arc;
 
-use log;
-
 mod stable_list;
 use stable_list::StableList;
 
@@ -69,7 +67,8 @@ mod tests {
     use log::info;
 
     #[test]
-    fn simple_contains() {
+    // Ensures that an info level log is recorded and any_msg_contains can see it
+    fn simple_any_msg_contains() {
         let handle = get_handle();
         let num_recs = handle.list.len();
         info!("logging message");

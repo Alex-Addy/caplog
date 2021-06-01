@@ -17,10 +17,6 @@ impl<T> StableList<T> {
     }
 
     pub fn iter(&self) -> StableListIterator<T> {
-        let list = match self.0.list_lock.read() {
-            Ok(lock) => lock,
-            Err(_) => panic!("StableList's internal mutex has been poisoned"),
-        };
         StableListIterator {
             global_idx: 0,
             chunk: std::ptr::null(),
@@ -43,10 +39,29 @@ impl<T> StableList<T> {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// Returns an internal chunk
+    ///
+    /// # Safety
+    ///
+    /// Caller is responsible for ensuring that any elements accessed in chunk have been
+    /// initialized. Any element before the current len is considered valid.
+    pub unsafe fn get_chunk(
+        &self,
+        idx: usize,
+    ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
+        self.0.get_chunk(idx)
+    }
 }
+
+// # Safety of StableListInner design
+//
+// # Read XOR Write
+// # Aliasing
 
 struct StableListInner<T> {
     list_lock: RwLock<LinkedList<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>>,
+
     /// Index just past the last initialized item in the StableList
     ///
     /// The item pointed to by this idx is uninitialized or may not exist.
@@ -79,6 +94,7 @@ impl<T> StableListInner<T> {
             // we have all full blocks and have to add a new one
             // Safety: We are telling the compiler to assume initialization of the MaybeUninit values
             // *not* the T inside them. MaybeUninit requires no initialization.
+            #[allow(clippy::uninit_assumed_init)]
             let block: [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE] =
                 unsafe { MaybeUninit::uninit().assume_init() };
             list.push_back(Box::into_raw(Box::new(block)));
@@ -87,11 +103,13 @@ impl<T> StableListInner<T> {
             .iter_mut()
             .last()
             .expect("no block in list even though we tried to add one");
+        // Safety: value pointed to by global_idx has not yet been initialized
         unsafe { *(**last_block)[global_idx % BLOCK_SIZE].get() = MaybeUninit::new(item) };
         // Safety: only modify last_global_idx while we have the lock
         self.last_global_idx.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Returns list length
     fn len(&self) -> usize {
         self.last_global_idx.load(Ordering::SeqCst) as usize
     }
@@ -102,7 +120,7 @@ impl<T> StableListInner<T> {
     ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
         println!("stable: fetching {} chunk", idx);
         match self.list_lock.read() {
-            Ok(lock) => lock.iter().nth(idx).map(|&val| val),
+            Ok(lock) => lock.iter().nth(idx).copied(),
             Err(_) => panic!("StableList's internal mutex has been poisoned"),
         }
     }
