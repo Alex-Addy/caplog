@@ -11,7 +11,7 @@ use stable_list::StableList;
 lazy_static! {
     static ref _CAPTURE_LOG: Box<Caplog> = {
         let handler = Box::new(Caplog {
-           logs: Arc::new(StableList::new())
+            logs: Arc::new(StableList::new()),
         });
         log::set_boxed_logger(handler.clone()).unwrap();
         log::set_max_level(log::LevelFilter::Trace);
