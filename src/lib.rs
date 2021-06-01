@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use log;
 
@@ -11,7 +11,7 @@ use stable_list::StableList;
 lazy_static! {
     static ref _CAPTURE_LOG: Box<Caplog> = {
         let handler = Box::new(Caplog {
-           inner: Arc::new(Mutex::new(CaplogInner::new()))
+           logs: Arc::new(StableList::new())
         });
         log::set_boxed_logger(handler.clone()).unwrap();
         log::set_max_level(log::LevelFilter::Trace);
@@ -21,7 +21,7 @@ lazy_static! {
 
 #[derive(Clone)]
 struct Caplog {
-    inner: Arc<Mutex<CaplogInner>>,
+    logs: Arc<StableList<Record>>,
 }
 
 impl log::Log for Caplog {
@@ -31,7 +31,7 @@ impl log::Log for Caplog {
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            self.inner.lock().unwrap().logs.push(Record {
+            self.logs.push(Record {
                 level: record.level(),
                 msg: record.args().to_string(),
             })
@@ -41,33 +41,25 @@ impl log::Log for Caplog {
     fn flush(&self) {}
 }
 
-struct Record {
-    level: log::Level,
-    msg: String,
-}
-
-struct CaplogInner {
-    logs: StableList<Record>,
-}
-
-impl CaplogInner {
-    fn new() -> Self {
-        Self { logs: StableList::new() }
-    }
+#[derive(Debug)]
+pub struct Record {
+    pub level: log::Level,
+    pub msg: String,
 }
 
 pub struct CaplogHandle {
-    start_idx: usize,
-    end_idx: Option<usize>,
+    list: Arc<StableList<Record>>,
 }
 
 impl CaplogHandle {
+    pub fn any_msg_contains(&self, snippet: &str) -> bool {
+        self.list.iter().any(|rec| dbg!(rec).msg.contains(snippet))
+    }
 }
 
 pub fn get_handle() -> CaplogHandle {
     CaplogHandle {
-        start_idx: _CAPTURE_LOG.inner.lock().unwrap().logs.len(),
-        end_idx: None,
+        list: _CAPTURE_LOG.logs.clone(),
     }
 }
 
@@ -76,15 +68,12 @@ mod tests {
     use super::*;
     use log::info;
 
-    //#[test]
-    //fn simple_contains() {
-    //    let mut handle = get_handle();
-    //    let present = "present msg";
-    //    let not_present = "not present in messages";
-    //    info!("{}", present);
-    //    handle.stop_recording();
-    //    info!("{}", not_present);
-    //    assert!(handle.any_msg_contains(present));
-    //    assert!(!handle.any_msg_contains(not_present));
-    //}
+    #[test]
+    fn simple_contains() {
+        let handle = get_handle();
+        let num_recs = handle.list.len();
+        info!("logging message");
+        assert!(handle.list.len() > num_recs);
+        assert!(handle.any_msg_contains("logging message"));
+    }
 }

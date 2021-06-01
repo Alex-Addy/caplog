@@ -20,7 +20,7 @@ impl<T> StableList<T> {
         };
         StableListIterator {
             global_idx: 0,
-            chunk: list.iter().last().map_or(std::ptr::null(), |v| *v),
+            chunk: std::ptr::null(),
             list: self,
         }
     }
@@ -127,7 +127,7 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.chunk.is_null() {
-            match unsafe { self.list.0.get_chunk(0) } {
+            match unsafe { dbg!(self.list.0.get_chunk(0)) } {
                 Some(next_chunk) => self.chunk = next_chunk,
                 None => return None,
             }
@@ -164,12 +164,13 @@ mod test {
     use super::*;
 
     #[test]
-    // Test that an item pushed into StableList can then be retrieved via `get`
+    // Test that an item pushed into StableList can then be retrieved via `get` and the iterator
     fn push_and_check_single_item() {
         let list = StableList::new();
         assert_eq!(list.get(0), None);
         list.push(1002);
         assert_eq!(list.get(0), Some(&1002));
+        assert_eq!(list.iter().next(), Some(&1002));
     }
 
     #[test]
