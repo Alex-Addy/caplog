@@ -1,11 +1,48 @@
 use std::collections::LinkedList;
 use std::mem::MaybeUninit;
 use std::cell::UnsafeCell;
-use std::sync::{RwLock, atomic::{AtomicU32, Ordering}};
+use std::sync::{Arc, RwLock, atomic::{AtomicU32, Ordering}};
 
 const BLOCK_SIZE: usize = 128;
 
-pub struct StableList<T> {
+#[derive(Clone)]
+pub struct StableList<T>(Arc<StableListInner<T>>);
+
+impl<T> StableList<T> {
+    pub fn new() -> Self {
+        Self(Arc::new(StableListInner::new()))
+    }
+
+    pub fn iter(&self) -> StableListIterator<T> {
+        let list = match self.0.list_lock.read() {
+           Ok(lock) => lock,
+           Err(_) => panic!("StableList's internal mutex has been poisoned"),
+        };
+        StableListIterator {
+            global_idx: 0,
+            chunk: list.iter().last().map_or(std::ptr::null(), |v| *v),
+            list: self,
+        }
+    }
+
+    //
+    // passthrough functions
+    //
+
+    pub fn push(&self, item: T) {
+        self.0.push(item)
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&T> {
+        self.0.get(idx)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+struct StableListInner<T> {
     list_lock: RwLock<LinkedList<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>>,
     /// Index just past the last initialized item in the StableList
     ///
@@ -13,20 +50,19 @@ pub struct StableList<T> {
     last_global_idx: AtomicU32,
 }
 
-unsafe impl<T> Send for StableList<T> where T: Send {}
-unsafe impl<T> Sync for StableList<T> {}
+unsafe impl<T> Send for StableListInner<T> where T: Send {}
+unsafe impl<T> Sync for StableListInner<T> {}
 
-impl<T> StableList<T> {
-    pub fn new() -> Self {
-        let mut list: LinkedList<*const _> = LinkedList::new();
-        let block: [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
-        StableList{
+impl<T> StableListInner<T> {
+    fn new() -> Self {
+        let list: LinkedList<*const _> = LinkedList::new();
+        StableListInner{
             list_lock: RwLock::new(list),
             last_global_idx: AtomicU32::new(0),
         }
     }
 
-    pub fn push(&self, item: T) {
+    fn push(&self, item: T) {
        let mut list = match self.list_lock.write() {
            Ok(lock) => lock,
            Err(_) => panic!("StableList's internal mutex has been poisoned"),
@@ -49,7 +85,7 @@ impl<T> StableList<T> {
        self.last_global_idx.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
        self.last_global_idx.load(Ordering::SeqCst) as usize
     }
 
@@ -75,40 +111,28 @@ impl<T> StableList<T> {
         }
     }
 
-    pub fn iter(&self) -> StableListIterator<'_, T> {
-        let list = match self.list_lock.read() {
-           Ok(lock) => lock,
-           Err(_) => panic!("StableList's internal mutex has been poisoned"),
-        };
-        let global_idx = self.last_global_idx.load(Ordering::SeqCst) as usize;
-        StableListIterator {
-            global_idx: global_idx,
-            chunk: list.iter().last().map_or(std::ptr::null(), |v| *v),
-            list: self,
-        }
-    }
 }
 
 // TODO impl Drop for StableList, by default dropping MaybeUninit does nothing resulting in the
 // internal values leaking if they are heap allocated
 
-struct StableListIterator<'a, T: 'a> {
+pub struct StableListIterator<'a, T> {
     global_idx: usize,
     chunk: *const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE],
     list: &'a StableList<T>,
 }
 
-impl<'a, T: std::fmt::Debug> Iterator for StableListIterator<'a, T> {
+impl<'a, T> Iterator for StableListIterator<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.chunk.is_null() {
-            match unsafe { self.list.get_chunk(0) } {
+            match unsafe { self.list.0.get_chunk(0) } {
                 Some(next_chunk) => self.chunk = next_chunk,
                 None => return None,
             }
             let val = unsafe { (&*self.chunk)[self.global_idx % BLOCK_SIZE].get().as_ref().unwrap() };
-            return dbg!(Some(unsafe { &*val.as_ptr().as_ref().unwrap() }));
+            return Some(unsafe { &*val.as_ptr().as_ref().unwrap() });
         }
         if self.global_idx + 1 == self.list.len() {
             // no values to return right now
@@ -119,7 +143,7 @@ impl<'a, T: std::fmt::Debug> Iterator for StableListIterator<'a, T> {
             // this would be a lot simpler if LinkedList exposed a way to hold a reference to a
             // node, the proposed cursor API might be what is necessary: https://github.com/rust-lang/rust/issues/58533
             // TODO safety
-            match unsafe { self.list.get_chunk(self.global_idx / BLOCK_SIZE + 1) } {
+            match unsafe { self.list.0.get_chunk(self.global_idx / BLOCK_SIZE + 1) } {
                 None => return None,
                 Some(chunk) => {
                     dbg!(chunk);
@@ -131,14 +155,13 @@ impl<'a, T: std::fmt::Debug> Iterator for StableListIterator<'a, T> {
             self.global_idx += 1;
         }
         let val = unsafe { (&*self.chunk)[self.global_idx % BLOCK_SIZE].get().as_ref().unwrap() };
-        return dbg!(Some(unsafe { &*val.as_ptr().as_ref().unwrap() }));
+        return Some(unsafe { &*val.as_ptr().as_ref().unwrap() });
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use proptest::prelude::*;
 
     #[test]
     // Test that an item pushed into StableList can then be retrieved via `get`
@@ -177,7 +200,7 @@ mod test {
     // Test that populating the list then iterating over it works
     fn populate_and_iterate_simple() {
         let list = StableList::new();
-        let mut iter = list.iter();
+        let iter = list.iter();
         let arb_values = BLOCK_SIZE * 2 + 1;
         for i in 0..(arb_values) {
             list.push(i * 10);
@@ -185,7 +208,6 @@ mod test {
         assert_eq!(list.len(), arb_values);
         let mut values_found = 0;
         for (exp, val) in (0..).zip(iter) {
-            dbg!((exp*10, val, list.get(exp)));
             assert_eq!(exp*10, *val);
             values_found += 1;
         }
@@ -196,7 +218,7 @@ mod test {
     // Test that iterator will return values again after returning None if new values are added to
     // base list
     fn iterator_resumption() {
-        let mut list = StableList::new();
+        let list = StableList::new();
         let mut iter = list.iter();
         assert_eq!(list.len(), 0);
         assert_eq!(iter.next(), None);
@@ -219,14 +241,4 @@ mod test {
             assert_eq!(Some(&i), b);
         }
     }
-
-    //proptest! {
-    //    #[test]
-    //    fn test_calc_local_idx(last_global: usize, block_size: std::num::NonZeroUsize) {
-    //        let idx = StableList::calc_local_idx(last_global, block_size);
-    //        assert!(idx < block_size);
-    //        assert!(idx < block_size);
-    //        assert!(idx == last_global % block_size);
-    //    }
-    //}
 }
