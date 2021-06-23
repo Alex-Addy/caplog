@@ -26,7 +26,7 @@ impl<T> StableList<T> {
     /// Iterator is created and operates via lockless operations.
     pub fn iter(&self) -> StableListIterator<T> {
         StableListIterator {
-            global_idx: 0,
+            idx: 0,
             chunk: std::ptr::null(),
             list: self,
         }
@@ -166,8 +166,7 @@ unsafe fn unwrap_value<'a, T>(cell: &'a UnsafeCell<MaybeUninit<T>>) -> &'a T {
 // internal values leaking if they are heap allocated
 
 pub struct StableListIterator<'a, T> {
-    // TODO rename to not be global
-    global_idx: usize,
+    idx: usize,
     chunk: *const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE],
     list: &'a StableList<T>,
 }
@@ -182,28 +181,26 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
                 None => return None,
             }
             // TODO simplify all this and move it into a function for thorough documentation
-            return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % CHUNK_SIZE]) });
+            return Some(unsafe { unwrap_value(&(&*self.chunk)[0]) });
         }
-        if self.global_idx + 1 == self.list.len() {
+        if self.idx + 1 == self.list.len() {
             // no values to return right now
             return None;
         }
 
-        if self.global_idx % CHUNK_SIZE + 1 == CHUNK_SIZE {
+        if self.idx % CHUNK_SIZE + 1 == CHUNK_SIZE {
             // this would be a lot simpler if LinkedList exposed a way to hold a reference to a
             // node, the proposed cursor API might be what is necessary: https://github.com/rust-lang/rust/issues/58533
             // TODO safety
-            match unsafe { self.list.0.get_chunk(self.global_idx / CHUNK_SIZE + 1) } {
+            match unsafe { self.list.0.get_chunk(self.idx / CHUNK_SIZE + 1) } {
                 None => return None,
                 Some(chunk) => {
-                    self.global_idx += 1;
                     self.chunk = chunk;
                 }
             }
-        } else {
-            self.global_idx += 1;
         }
-        return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % CHUNK_SIZE]) });
+        self.idx += 1;
+        Some(unsafe { unwrap_value(&(&*self.chunk)[self.idx % CHUNK_SIZE]) })
     }
 }
 
