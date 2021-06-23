@@ -8,6 +8,11 @@ use std::sync::{
 
 const BLOCK_SIZE: usize = 128;
 
+/// StableList provides a List type that allows for an arbitrary number of simultaneous lockless
+/// readers and with a single locking writer. Readers are never interrupted by a writer.
+///
+/// In order to provide this guarantee, the list will never delete an item or move its location in
+/// memory. Items can only be deleted by dropping all copies of the list.
 #[derive(Clone)]
 pub struct StableList<T>(Arc<StableListInner<T>>);
 
@@ -16,6 +21,9 @@ impl<T> StableList<T> {
         Self(Arc::new(StableListInner::new()))
     }
 
+    /// Provide an iterator for the entire list.
+    ///
+    /// Iterator is created and operates via lockless operations.
     pub fn iter(&self) -> StableListIterator<T> {
         StableListIterator {
             global_idx: 0,
@@ -28,14 +36,19 @@ impl<T> StableList<T> {
     // passthrough functions
     //
 
+    /// Push new item onto back of list.
     pub fn push(&self, item: T) {
         self.0.push(item)
     }
 
+    /// Get single item from list.
+    ///
+    /// This will acquire a lock, for lockless reading use the `iter` function.
     pub fn get(&self, idx: usize) -> Option<&T> {
         self.0.get(idx)
     }
 
+    /// Returns current length of the list.
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -54,11 +67,6 @@ impl<T> StableList<T> {
     }
 }
 
-// # Safety of StableListInner design
-//
-// # Read XOR Write
-// # Aliasing
-
 struct StableListInner<T> {
     list_lock: RwLock<LinkedList<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>>,
 
@@ -68,6 +76,7 @@ struct StableListInner<T> {
     last_global_idx: AtomicU32,
 }
 
+// TODO Document
 unsafe impl<T> Send for StableListInner<T> where T: Send {}
 unsafe impl<T> Sync for StableListInner<T> {}
 
@@ -103,7 +112,9 @@ impl<T> StableListInner<T> {
             .iter_mut()
             .last()
             .expect("no block in list even though we tried to add one");
-        // Safety: value pointed to by global_idx has not yet been initialized
+        // Safety: value pointed to by global_idx has not yet been initialized but it safe to write
+        // to uninitialized memory. And it is not visible to anyone obeying promises of
+        // `get_chunk`, so it is safe to write to it with this exclusive access.
         unsafe { *(**last_block)[global_idx % BLOCK_SIZE].get() = MaybeUninit::new(item) };
         // Safety: only modify last_global_idx while we have the lock
         self.last_global_idx.fetch_add(1, Ordering::SeqCst);
@@ -118,7 +129,6 @@ impl<T> StableListInner<T> {
         &self,
         idx: usize,
     ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
-        println!("stable: fetching {} chunk", idx);
         match self.list_lock.read() {
             Ok(lock) => lock.iter().nth(idx).copied(),
             Err(_) => panic!("StableList's internal mutex has been poisoned"),
@@ -134,17 +144,29 @@ impl<T> StableListInner<T> {
             // Safety: All values before last_global_idx are guaranteed to be initialized
             list.iter()
                 .nth(idx / BLOCK_SIZE)
-                .map(|ch| unsafe { &*(*(&**ch)[idx % BLOCK_SIZE].get()).as_ptr() })
+                .map(|ch| unsafe { unwrap_value(&(&**ch)[idx % BLOCK_SIZE]) })
         } else {
             None
         }
     }
 }
 
+// Call to convert a value wrapped in UnsafeCell<MaybeUninit<T>> to T
+//
+// # Safety
+// Caller must guarantee that the location pointed to by cell is initialized.
+// Caller must also guarantee that value will not be modified while this reference is alive.
+//
+// Failure to provide the above guarantees will result in Undefined Behavior.
+unsafe fn unwrap_value<'a, T>(cell: &'a UnsafeCell<MaybeUninit<T>>) -> &'a T {
+    &*cell.get().as_ref().unwrap().as_ptr().as_ref().unwrap()
+}
+
 // TODO impl Drop for StableList, by default dropping MaybeUninit does nothing resulting in the
 // internal values leaking if they are heap allocated
 
 pub struct StableListIterator<'a, T> {
+    // TODO rename to not be global
     global_idx: usize,
     chunk: *const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE],
     list: &'a StableList<T>,
@@ -155,17 +177,12 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.chunk.is_null() {
-            match unsafe { dbg!(self.list.0.get_chunk(0)) } {
+            match unsafe { self.list.0.get_chunk(0) } {
                 Some(next_chunk) => self.chunk = next_chunk,
                 None => return None,
             }
-            let val = unsafe {
-                (&*self.chunk)[self.global_idx % BLOCK_SIZE]
-                    .get()
-                    .as_ref()
-                    .unwrap()
-            };
-            return Some(unsafe { &*val.as_ptr().as_ref().unwrap() });
+            // TODO simplify all this and move it into a function for thorough documentation
+            return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % BLOCK_SIZE]) });
         }
         if self.global_idx + 1 == self.list.len() {
             // no values to return right now
@@ -179,7 +196,6 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
             match unsafe { self.list.0.get_chunk(self.global_idx / BLOCK_SIZE + 1) } {
                 None => return None,
                 Some(chunk) => {
-                    dbg!(chunk);
                     self.global_idx += 1;
                     self.chunk = chunk;
                 }
@@ -187,13 +203,7 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
         } else {
             self.global_idx += 1;
         }
-        let val = unsafe {
-            (&*self.chunk)[self.global_idx % BLOCK_SIZE]
-                .get()
-                .as_ref()
-                .unwrap()
-        };
-        return Some(unsafe { &*val.as_ptr().as_ref().unwrap() });
+        return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % BLOCK_SIZE]) });
     }
 }
 

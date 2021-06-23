@@ -51,7 +51,11 @@ pub struct CaplogHandle {
 
 impl CaplogHandle {
     pub fn any_msg_contains(&self, snippet: &str) -> bool {
-        self.list.iter().any(|rec| dbg!(rec).msg.contains(snippet))
+        self.list.iter().any(|rec| rec.msg.contains(snippet))
+    }
+
+    pub fn iter(&self) -> impl Iterator + '_ {
+        self.list.iter()
     }
 }
 
