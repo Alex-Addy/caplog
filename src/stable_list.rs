@@ -6,7 +6,7 @@ use std::sync::{
     Arc, RwLock,
 };
 
-const BLOCK_SIZE: usize = 128;
+const CHUNK_SIZE: usize = 128;
 
 /// StableList provides a List type that allows for an arbitrary number of simultaneous lockless
 /// readers and with a single locking writer. Readers are never interrupted by a writer.
@@ -62,13 +62,13 @@ impl<T> StableList<T> {
     pub unsafe fn get_chunk(
         &self,
         idx: usize,
-    ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
+    ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE]> {
         self.0.get_chunk(idx)
     }
 }
 
 struct StableListInner<T> {
-    list_lock: RwLock<LinkedList<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]>>,
+    list_lock: RwLock<LinkedList<*const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE]>>,
 
     /// Index just past the last initialized item in the StableList
     ///
@@ -99,12 +99,12 @@ impl<T> StableListInner<T> {
         if global_idx == u32::MAX as usize {
             panic!("list is full, cannot index past 2^32");
         }
-        if global_idx % BLOCK_SIZE == 0 {
+        if global_idx % CHUNK_SIZE == 0 {
             // we have all full blocks and have to add a new one
             // Safety: We are telling the compiler to assume initialization of the MaybeUninit values
             // *not* the T inside them. MaybeUninit requires no initialization.
             #[allow(clippy::uninit_assumed_init)]
-            let block: [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE] =
+            let block: [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE] =
                 unsafe { MaybeUninit::uninit().assume_init() };
             list.push_back(Box::into_raw(Box::new(block)));
         }
@@ -115,7 +115,7 @@ impl<T> StableListInner<T> {
         // Safety: value pointed to by global_idx has not yet been initialized but it safe to write
         // to uninitialized memory. And it is not visible to anyone obeying promises of
         // `get_chunk`, so it is safe to write to it with this exclusive access.
-        unsafe { *(**last_block)[global_idx % BLOCK_SIZE].get() = MaybeUninit::new(item) };
+        unsafe { *(**last_block)[global_idx % CHUNK_SIZE].get() = MaybeUninit::new(item) };
         // Safety: only modify last_global_idx while we have the lock
         self.last_global_idx.fetch_add(1, Ordering::SeqCst);
     }
@@ -128,7 +128,7 @@ impl<T> StableListInner<T> {
     unsafe fn get_chunk(
         &self,
         idx: usize,
-    ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE]> {
+    ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE]> {
         match self.list_lock.read() {
             Ok(lock) => lock.iter().nth(idx).copied(),
             Err(_) => panic!("StableList's internal mutex has been poisoned"),
@@ -143,8 +143,8 @@ impl<T> StableListInner<T> {
             };
             // Safety: All values before last_global_idx are guaranteed to be initialized
             list.iter()
-                .nth(idx / BLOCK_SIZE)
-                .map(|ch| unsafe { unwrap_value(&(&**ch)[idx % BLOCK_SIZE]) })
+                .nth(idx / CHUNK_SIZE)
+                .map(|ch| unsafe { unwrap_value(&(&**ch)[idx % CHUNK_SIZE]) })
         } else {
             None
         }
@@ -168,7 +168,7 @@ unsafe fn unwrap_value<'a, T>(cell: &'a UnsafeCell<MaybeUninit<T>>) -> &'a T {
 pub struct StableListIterator<'a, T> {
     // TODO rename to not be global
     global_idx: usize,
-    chunk: *const [UnsafeCell<MaybeUninit<T>>; BLOCK_SIZE],
+    chunk: *const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE],
     list: &'a StableList<T>,
 }
 
@@ -182,18 +182,18 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
                 None => return None,
             }
             // TODO simplify all this and move it into a function for thorough documentation
-            return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % BLOCK_SIZE]) });
+            return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % CHUNK_SIZE]) });
         }
         if self.global_idx + 1 == self.list.len() {
             // no values to return right now
             return None;
         }
 
-        if self.global_idx % BLOCK_SIZE + 1 == BLOCK_SIZE {
+        if self.global_idx % CHUNK_SIZE + 1 == CHUNK_SIZE {
             // this would be a lot simpler if LinkedList exposed a way to hold a reference to a
             // node, the proposed cursor API might be what is necessary: https://github.com/rust-lang/rust/issues/58533
             // TODO safety
-            match unsafe { self.list.0.get_chunk(self.global_idx / BLOCK_SIZE + 1) } {
+            match unsafe { self.list.0.get_chunk(self.global_idx / CHUNK_SIZE + 1) } {
                 None => return None,
                 Some(chunk) => {
                     self.global_idx += 1;
@@ -203,7 +203,7 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
         } else {
             self.global_idx += 1;
         }
-        return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % BLOCK_SIZE]) });
+        return Some(unsafe { unwrap_value(&(&*self.chunk)[self.global_idx % CHUNK_SIZE]) });
     }
 }
 
@@ -225,10 +225,10 @@ mod test {
     fn push_and_check_full_chunk() {
         let list = StableList::new();
         assert_eq!(list.get(0), None);
-        for i in 0..BLOCK_SIZE {
+        for i in 0..CHUNK_SIZE {
             list.push(100 + i);
         }
-        for i in 0..BLOCK_SIZE {
+        for i in 0..CHUNK_SIZE {
             assert_eq!(list.get(i), Some(&(100 + i)));
         }
     }
@@ -237,10 +237,10 @@ mod test {
     fn push_and_check_multiple_chunks() {
         let list = StableList::new();
         assert_eq!(list.get(0), None);
-        for i in 0..(BLOCK_SIZE * 2) {
+        for i in 0..(CHUNK_SIZE * 2) {
             list.push(100 + i);
         }
-        for i in 0..(BLOCK_SIZE * 2) {
+        for i in 0..(CHUNK_SIZE * 2) {
             assert_eq!(list.get(i), Some(&(100 + i)));
         }
     }
@@ -250,7 +250,7 @@ mod test {
     fn populate_and_iterate_simple() {
         let list = StableList::new();
         let iter = list.iter();
-        let arb_values = BLOCK_SIZE * 2 + 1;
+        let arb_values = CHUNK_SIZE * 2 + 1;
         for i in 0..(arb_values) {
             list.push(i * 10);
         }
