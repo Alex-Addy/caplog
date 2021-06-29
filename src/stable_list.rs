@@ -13,7 +13,7 @@ const CHUNK_SIZE: usize = 128;
 ///
 /// In order to provide this guarantee, the list will never delete an item or move its location in
 /// memory. Items can only be deleted by dropping all copies of the list.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StableList<T>(Arc<StableListInner<T>>);
 
 impl<T> StableList<T> {
@@ -23,10 +23,28 @@ impl<T> StableList<T> {
 
     /// Provide an iterator for the entire list.
     ///
-    /// Iterator is created and operates via lockless operations.
+    /// Iterator will return items after returning None if additional items have been pushed to
+    /// list in between.
+    ///
+    /// Iterator is created and operated via lockless operations.
     pub fn iter(&self) -> StableListIterator<T> {
         StableListIterator {
             idx: 0,
+            end_idx: None,
+            chunk: std::ptr::null(),
+            list: self,
+        }
+    }
+
+    /// Provides an iterator for the specified range, end is not exclusive.
+    ///
+    /// In the case that `start` or `end` are out of bounds, `next` will return `None` until they
+    /// are valid indices into the list. Iterator will resume just like the unbounded iterator
+    /// returned by `iter`.
+    pub fn bounded_iter(&self, start: usize, end: Option<usize>) -> StableListIterator<T> {
+        StableListIterator {
+            idx: start,
+            end_idx: end,
             chunk: std::ptr::null(),
             list: self,
         }
@@ -67,6 +85,7 @@ impl<T> StableList<T> {
     }
 }
 
+#[derive(Debug)]
 struct StableListInner<T> {
     list_lock: RwLock<LinkedList<*const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE]>>,
 
@@ -165,8 +184,15 @@ unsafe fn unwrap_value<'a, T>(cell: &'a UnsafeCell<MaybeUninit<T>>) -> &'a T {
 // TODO impl Drop for StableList, by default dropping MaybeUninit does nothing resulting in the
 // internal values leaking if they are heap allocated
 
+#[derive(Debug)]
 pub struct StableListIterator<'a, T> {
+    /// The index in `list` of the last value returned.
     idx: usize,
+    /// The index after the last value to return, if None iterator is unbounded.
+    end_idx: Option<usize>,
+    /// Currently cached chunk, current index should be inside it.
+    ///
+    /// Will be null if no items have been returned from this iterator yet.
     chunk: *const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE],
     list: &'a StableList<T>,
 }
@@ -176,12 +202,23 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.chunk.is_null() {
-            match unsafe { self.list.0.get_chunk(0) } {
+            // we have not handed out any values yet
+            if self.idx >= self.list.len() + 1 {
+                // list is not yet long enough to provide a value
+                return None;
+            }
+            match unsafe { self.list.0.get_chunk((self.idx) / CHUNK_SIZE) } {
                 Some(next_chunk) => self.chunk = next_chunk,
                 None => return None,
             }
-            // TODO simplify all this and move it into a function for thorough documentation
-            return Some(unsafe { unwrap_value(&(&*self.chunk)[0]) });
+            // TODO safety
+            return Some(unsafe { unwrap_value(&(&*self.chunk)[self.idx % CHUNK_SIZE]) });
+        }
+        if let Some(end_idx) = self.end_idx {
+            if self.idx + 1 == end_idx {
+                // reached end of bounds
+                return None;
+            }
         }
         if self.idx + 1 == self.list.len() {
             // no values to return right now
@@ -209,7 +246,7 @@ mod test {
     use super::*;
 
     #[test]
-    // Test that an item pushed into StableList can then be retrieved via `get` and the iterator
+    /// Test that an item pushed into StableList can then be retrieved via `get` and the iterator
     fn push_and_check_single_item() {
         let list = StableList::new();
         assert_eq!(list.get(0), None);
@@ -243,7 +280,7 @@ mod test {
     }
 
     #[test]
-    // Test that populating the list then iterating over it works
+    /// Test that populating the list then iterating over it works
     fn populate_and_iterate_simple() {
         let list = StableList::new();
         let iter = list.iter();
@@ -261,8 +298,8 @@ mod test {
     }
 
     #[test]
-    // Test that iterator will return values again after returning None if new values are added to
-    // base list
+    /// Test that iterator will return values again after returning None if new values are added to
+    /// base list
     fn iterator_resumption() {
         let list = StableList::new();
         let mut iter = list.iter();
@@ -274,7 +311,7 @@ mod test {
     }
 
     #[test]
-    // Test that handing out multiple iterators at the same time works.
+    /// Test that handing out multiple iterators at the same time works.
     fn multiple_iterators() {
         let list = StableList::<i32>::new();
         let mut iter_1 = list.iter();
@@ -286,5 +323,60 @@ mod test {
             assert_eq!(Some(&i), a);
             assert_eq!(Some(&i), b);
         }
+    }
+
+    #[test]
+    /// Test that iterator can be bounded and retain resumption
+    fn bounded_iterator_resumption() {
+        let list = StableList::new();
+        let mut iter = list.bounded_iter(0, Some(5));
+        assert_eq!(iter.next(), None);
+        for i in 1000..1010 {
+            list.push(i);
+        }
+        assert_eq!(list.len(), 10);
+        for i in 1000..1005 {
+            assert_eq!(iter.next(), Some(&i));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    /// Test that iterator can be started from a non-zero index
+    fn bounded_iterator_non_zero_start() {
+        let list = StableList::new();
+        let mut iter = list.bounded_iter(5, None);
+        assert_eq!(iter.next(), None);
+        for i in 1000..1010 {
+            list.push(i);
+        }
+        for i in 1005..1010 {
+            assert_eq!(iter.next(), Some(&i));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    /// Test that iterators started around BLOCK_SIZE doesn't encounter edge cases
+    fn bounded_iterator_boundary_start() {
+        let list = StableList::new();
+        for i in 0..(CHUNK_SIZE * 2) {
+            list.push(i * 2);
+        }
+        let expected = ((CHUNK_SIZE - 1)..=(CHUNK_SIZE + 1))
+            .map(|v| v * 2)
+            .collect::<Vec<usize>>();
+        let mut lower_iter = list.bounded_iter(CHUNK_SIZE - 1, None);
+        let mut middle_iter = list.bounded_iter(CHUNK_SIZE, None);
+        let mut upper_iter = list.bounded_iter(CHUNK_SIZE + 1, None);
+        assert_eq!(
+            expected,
+            lower_iter.take(3).copied().collect::<Vec<usize>>()
+        );
+        assert_eq!(
+            expected[1..],
+            middle_iter.take(2).copied().collect::<Vec<usize>>()
+        );
+        assert_eq!(expected.get(2), upper_iter.next());
     }
 }
