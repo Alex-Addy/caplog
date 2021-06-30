@@ -58,7 +58,9 @@ pub struct CaplogHandle {
 
 impl CaplogHandle {
     pub fn any_msg_contains(&self, snippet: &str) -> bool {
-        self.list.bounded_iter(self.start_idx, self.stop_idx).any(|rec| rec.msg.contains(snippet))
+        self.list
+            .bounded_iter(self.start_idx, self.stop_idx)
+            .any(|rec| rec.msg.contains(snippet))
     }
 
     /// Returns an iterator over the items viewable by this handle.
@@ -96,7 +98,7 @@ pub fn get_handle() -> CaplogHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use log::info;
+    use log::{error, info, trace, warn};
 
     #[test]
     // Ensures that an info level log is recorded and any_msg_contains can see it
@@ -106,5 +108,48 @@ mod tests {
         info!("logging message");
         assert!(handle.list.len() > num_recs);
         assert!(handle.any_msg_contains("logging message"));
+    }
+
+    #[test]
+    /// Verify an error message is recorded
+    fn verify_simple_error() {
+        let mut handle = get_handle();
+        let message = "verify_simple_error";
+        // Using the function name to help uniqueness
+        error!("{}", message);
+        handle.stop_recording();
+        assert!(handle.any_msg_contains(message));
+    }
+
+    #[test]
+    /// Verify an info message is recorded
+    fn verify_simple_info() {
+        let mut handle = get_handle();
+        let message = "verify_simple_info";
+        // Using the function name to help uniqueness
+        info!("{}", message);
+        handle.stop_recording();
+        assert!(handle.any_msg_contains(message));
+    }
+    #[test]
+    /// Verify a warn message is recorded
+    fn verify_simple_warn() {
+        let mut handle = get_handle();
+        let message = "verify_simple_warn";
+        // Using the function name to help uniqueness
+        warn!("{}", message);
+        handle.stop_recording();
+        assert!(handle.any_msg_contains(message));
+    }
+
+    #[test]
+    /// Verify a trace message is recorded
+    fn verify_simple_trace() {
+        let mut handle = get_handle();
+        let message = "verify_simple_trace";
+        // Using the function name to help uniqueness
+        trace!("{}", message);
+        handle.stop_recording();
+        assert!(handle.any_msg_contains(message));
     }
 }
