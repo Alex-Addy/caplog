@@ -21,6 +21,7 @@ impl<T> StableList<T> {
         Self(Arc::new(StableListInner::new()))
     }
 
+    #[cfg(test)]
     /// Provide an iterator for the entire list.
     ///
     /// Iterator will return items after returning None if additional items have been pushed to
@@ -59,6 +60,7 @@ impl<T> StableList<T> {
         self.0.push(item)
     }
 
+    #[cfg(test)]
     /// Get single item from list.
     ///
     /// This will acquire a lock, for lockless reading use the `iter` function.
@@ -69,19 +71,6 @@ impl<T> StableList<T> {
     /// Returns current length of the list.
     pub fn len(&self) -> usize {
         self.0.len()
-    }
-
-    /// Returns an internal chunk
-    ///
-    /// # Safety
-    ///
-    /// Caller is responsible for ensuring that any elements accessed in chunk have been
-    /// initialized. Any element before the current len is considered valid.
-    pub unsafe fn get_chunk(
-        &self,
-        idx: usize,
-    ) -> Option<*const [UnsafeCell<MaybeUninit<T>>; CHUNK_SIZE]> {
-        self.0.get_chunk(idx)
     }
 }
 
@@ -154,6 +143,7 @@ impl<T> StableListInner<T> {
         }
     }
 
+    #[cfg(test)]
     fn get(&self, idx: usize) -> Option<&T> {
         if idx < self.last_global_idx.load(Ordering::SeqCst) as usize {
             let list = match self.list_lock.read() {
@@ -177,7 +167,7 @@ impl<T> StableListInner<T> {
 // Caller must also guarantee that value will not be modified while this reference is alive.
 //
 // Failure to provide the above guarantees will result in Undefined Behavior.
-unsafe fn unwrap_value<'a, T>(cell: &'a UnsafeCell<MaybeUninit<T>>) -> &'a T {
+unsafe fn unwrap_value<T>(cell: &UnsafeCell<MaybeUninit<T>>) -> &T {
     &*cell.get().as_ref().unwrap().as_ptr().as_ref().unwrap()
 }
 
@@ -203,7 +193,7 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.chunk.is_null() {
             // we have not handed out any values yet
-            if self.idx >= self.list.len() + 1 {
+            if self.idx > self.list.len() {
                 // list is not yet long enough to provide a value
                 return None;
             }
@@ -366,8 +356,8 @@ mod test {
         let expected = ((CHUNK_SIZE - 1)..=(CHUNK_SIZE + 1))
             .map(|v| v * 2)
             .collect::<Vec<usize>>();
-        let mut lower_iter = list.bounded_iter(CHUNK_SIZE - 1, None);
-        let mut middle_iter = list.bounded_iter(CHUNK_SIZE, None);
+        let lower_iter = list.bounded_iter(CHUNK_SIZE - 1, None);
+        let middle_iter = list.bounded_iter(CHUNK_SIZE, None);
         let mut upper_iter = list.bounded_iter(CHUNK_SIZE + 1, None);
         assert_eq!(
             expected,
