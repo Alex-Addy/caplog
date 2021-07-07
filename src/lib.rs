@@ -1,3 +1,60 @@
+//! Utility for capturing and verification of log messages. Intended for use in testing of
+//! applications and libraries.
+//!
+//! Inspired by the fixture of the same name from `pytest`.
+//!
+//! # Using Caplog
+//!
+//! The primary functions of interest are `get_handle` and `CaplogHandle::iter`. Use `get_handle`
+//! at the top of your test in order to get a view of the messages being logged. After this, call
+//! `.iter` on the handle at any point in your test to get an `Iterator<Record>`. This iterator can
+//! then be used to view log messages.
+//!
+//! ```rust
+//! # use log::{info, warn};
+//! use caplog::get_handle;
+//!
+//! let handle = caplog::get_handle();
+//! warn!("terrible thing happened!");
+//! assert!(handle.iter().any(|rec| rec.msg.contains("terrible")));
+//! ```
+//!
+//! # Handle's view of logs
+//!
+//! Each handle has access to all messages sent while it was alive. This means that messages sent
+//! before it is made will not be available via `iter` or any other functions on it. So it is
+//! recommended to call `get_handle` at the top of tests to ensure the messages will be scope.
+//!
+//! # Threading concerns
+//!
+//! As the `log` interface is global, messages from other threads may be visible via the handle.
+//! Due to this, it is recommended to check for messages unique to the test when possible. For
+//! example:
+//!
+//! ```rust
+//! # use log::{info, warn};
+//! # use caplog::get_handle;
+//!
+//! fn handle_request(id: u32) -> Result<(), ()> {
+//!    info!("Got request from client {}", id);
+//!    Ok(())
+//! }
+//!
+//! let handle = caplog::get_handle();
+//! let client_id = 12345; // id unique to this test
+//! handle_request(client_id).unwrap();
+//! handle.any_msg_contains(&format!("Got request from client {}", client_id));
+//! ```
+//!
+//! Due to `info!` and the other `log` macros being blocking, it can be guaranteed that a message
+//! will be visible to the same thread it was called on by the time it returns.
+//!
+//! # Interaction with other log handlers
+//!
+//! `log`'s interface only allows for a single log handler at a time. In order to prevent collision
+//! with the regular handler, it is recommended to put initialization code for it either inside of
+//! main or put a `[cfg(not(test))]` attribute on it.
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -40,8 +97,12 @@ impl log::Log for Caplog {
 }
 
 #[derive(Debug)]
+/// A single log message.
 pub struct Record {
+    /// The level at which the message was logged.
     pub level: log::Level,
+
+    /// The message formatted as a string
     pub msg: String,
 }
 
@@ -58,7 +119,9 @@ pub struct CaplogHandle {
 
 impl CaplogHandle {
     pub fn any_msg_contains(&self, snippet: &str) -> bool {
-        self.list.bounded_iter(self.start_idx, self.stop_idx).any(|rec| rec.msg.contains(snippet))
+        self.list
+            .bounded_iter(self.start_idx, self.stop_idx)
+            .any(|rec| rec.msg.contains(snippet))
     }
 
     /// Returns an iterator over the items viewable by this handle.
@@ -72,7 +135,7 @@ impl CaplogHandle {
     }
 }
 
-/// Get a handle to the recorded logs. Handle is restricted to only viewing the logs available
+/// Get a handle to the recorded logs. Handle is bounded to only viewing the logs available
 /// while it is alive.
 ///
 /// # Example
