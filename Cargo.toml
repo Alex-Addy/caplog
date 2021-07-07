@@ -7,6 +7,10 @@ license = "MIT OR Apache-2.0"
 description = "Capture log messages for testing"
 categories = ["development-tools::testing", "development-tools::debugging"]
 repository = "https://github.com/Alex-Addy/caplog/"
+exclude = [
+    ".github/*",
+    "Contributing.md",
+]
 
 
 [dependencies]
