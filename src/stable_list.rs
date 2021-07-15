@@ -235,6 +235,8 @@ impl<'a, T> Iterator for StableListIterator<'a, T> {
 mod test {
     use super::*;
 
+    use proptest::proptest;
+
     #[test]
     /// Test that an item pushed into StableList can then be retrieved via `get` and the iterator
     fn push_and_check_single_item() {
@@ -368,5 +370,101 @@ mod test {
             middle_iter.take(2).copied().collect::<Vec<usize>>()
         );
         assert_eq!(expected.get(2), upper_iter.next());
+    }
+
+    proptest! {
+        #[test]
+        /// Verify that inserting a single item works across a range of values
+        fn test_insert_single_num(item in -1000..1000i32) {
+            let list = StableList::new();
+            list.push(item);
+            let retrieved = list.get(0).unwrap();
+            assert_eq!(retrieved, &item);
+        }
+
+        #[test]
+        /// Verify that a trivial Copy structure works with a variety of values
+        fn test_insert_single_copy(item_cons in -1000..1000i32) {
+            let list = StableList::new();
+            #[derive(Clone, Copy, Debug, PartialEq)]
+            struct Copyable {
+                val: i32
+            }
+            let item = Copyable {
+                val: item_cons
+            };
+            list.push(item);
+            let retrieved = list.get(0).unwrap();
+            assert_eq!(retrieved, &item);
+        }
+
+        #[test]
+        /// Verify that a trivial Clone structure works with a variety of values
+        fn test_insert_single_clone(item_cons in -1000..1000i32) {
+            let list = StableList::new();
+            #[derive(Clone, Debug, PartialEq)]
+            struct Cloneable {
+                val: i32
+            }
+            let item = Cloneable {
+                val: item_cons
+            };
+            let identical_item = Cloneable {
+                val: item_cons
+            };
+            list.push(item);
+            let retrieved = list.get(0).unwrap();
+            assert_eq!(retrieved, &identical_item);
+        }
+
+        #[test]
+        /// Verify that a single item that is only Eq works with a variety of values
+        fn test_insert_single(item_cons in -1000..1000i32) {
+            let list = StableList::new();
+            #[derive(Debug, PartialEq)]
+            struct NonClone {
+                val: i32
+            }
+            let item = NonClone {
+                val: item_cons
+            };
+            let identical_item = NonClone {
+                val: item_cons
+            };
+            list.push(item);
+            let retrieved = list.get(0).unwrap();
+            assert_eq!(retrieved, &identical_item);
+        }
+
+        #[test]
+        /// Verify that a variety of items go in and come out the same when the values are random
+        fn test_insert_multi_num(value_vec in proptest::collection::vec(-1000..10000i32, 1..1000)) {
+            let list = StableList::new();
+            for item in &value_vec {
+                list.push(*item);
+            }
+            // Probably a better way of doing this, but this is simple:
+            let result_vec = {
+                let mut result_vec = Vec::new();
+                for idx in 0..value_vec.len() {
+                    result_vec.push(*list.get(idx).unwrap());
+                }
+                result_vec
+            };
+            assert_eq!(result_vec, value_vec);
+        }
+
+        #[test]
+        /// Verify that a variety of items go in and the last value is correct
+        fn test_insert_multi_rtrv_last(value_vec in proptest::collection::vec(-1000..10000i32, 1..1000), some_value in -1000..1000i32) {
+            let list = StableList::new();
+            for item in &value_vec {
+                list.push(*item);
+            }
+            list.push(some_value);
+            let last_value = list.get(list.len() - 1).unwrap();
+            assert_eq!(last_value, &some_value);
+        }
+
     }
 }
