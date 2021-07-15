@@ -16,3 +16,6 @@ exclude = [
 [dependencies]
 lazy_static = "1.4"
 log = { version = "0.4", features = ["std"] }
+
+[dev-dependencies]
+proptest = "1"
