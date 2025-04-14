@@ -16,7 +16,7 @@
 //!
 //! let handle = caplog::get_handle();
 //! warn!("terrible thing happened!");
-//! assert!(handle.iter().any(|rec| rec.msg.contains("terrible")));
+//! assert!(handle.iter().any(|(_, rec)| rec.msg.contains("terrible")));
 //! ```
 //!
 //! # Handle's view of logs
@@ -60,13 +60,12 @@ extern crate lazy_static;
 
 use std::sync::Arc;
 
-mod stable_list;
-use stable_list::StableList;
+use boxcar;
 
 lazy_static! {
     static ref _CAPTURE_LOG: Box<Caplog> = {
         let handler = Box::new(Caplog {
-            logs: Arc::new(StableList::new()),
+            logs: Arc::new(boxcar::Vec::new()),
         });
         log::set_boxed_logger(handler.clone()).unwrap();
         log::set_max_level(log::LevelFilter::Trace);
@@ -76,7 +75,7 @@ lazy_static! {
 
 #[derive(Clone)]
 struct Caplog {
-    logs: Arc<StableList<Record>>,
+    logs: Arc<boxcar::Vec<Record>>,
 }
 
 impl log::Log for Caplog {
@@ -89,7 +88,7 @@ impl log::Log for Caplog {
             self.logs.push(Record {
                 level: record.level(),
                 msg: record.args().to_string(),
-            })
+            });
         }
     }
 
@@ -114,29 +113,33 @@ pub struct Record {
 pub struct CaplogHandle {
     start_idx: usize,
     stop_idx: Option<usize>,
-    list: Arc<StableList<Record>>,
+    list: Arc<boxcar::Vec<Record>>,
 }
 
 impl CaplogHandle {
+    // Returns true iff any log message within the capture range contains the provided snippet.
     pub fn any_msg_contains(&self, snippet: &str) -> bool {
-        self.list
-            .bounded_iter(self.start_idx, self.stop_idx)
-            .any(|rec| rec.msg.contains(snippet))
+        self.iter().any(|(_, rec)| rec.msg.contains(snippet))
     }
 
     /// Returns an iterator over the items viewable by this handle.
-    pub fn iter(&self) -> crate::stable_list::StableListIterator<Record> {
-        // TODO remove StableListIterator type from exposed types
-        self.list.bounded_iter(self.start_idx, self.stop_idx)
+    ///
+    /// Values are yielded in the form of (index, Record). There may be in progress concurrent
+    /// writes that create gaps, so `index` may not be strictly sequential.
+    pub fn iter(&self) -> Box<dyn Iterator<Item = (usize, &Record)> + '_> {
+        match self.stop_idx {
+            None => Box::new(self.list.iter().skip(self.start_idx)),
+            Some(stop_idx) => Box::new(self.list.iter().skip(self.start_idx).take(stop_idx-self.start_idx)),
+        }
     }
 
     pub fn stop_recording(&mut self) {
-        self.stop_idx = Some(self.list.len());
+        self.stop_idx = Some(self.list.count());
     }
 }
 
-/// Get a handle to the recorded logs. Handle is bounded to only viewing the logs available
-/// while it is alive.
+/// Get a handle to the recorded logs. Handle is bounded to only viewing the logs available while
+/// it is alive.
 ///
 /// # Example
 /// ```rust
@@ -144,13 +147,13 @@ impl CaplogHandle {
 /// info!("not recorded");
 /// let handle = caplog::get_handle();
 /// info!("recorded");
-/// assert!(handle.iter().any(|rec| rec.msg.contains("not recorded")) == false);
+/// assert!(handle.iter().any(|(_, rec)| rec.msg.contains("not recorded")) == false);
 /// assert!(handle.any_msg_contains("recorded"));
 /// ```
 pub fn get_handle() -> CaplogHandle {
     let log_list = _CAPTURE_LOG.logs.clone();
     CaplogHandle {
-        start_idx: log_list.len(),
+        start_idx: log_list.count(),
         stop_idx: None,
         list: log_list.clone(),
     }
@@ -165,9 +168,9 @@ mod tests {
     // Ensures that an info level log is recorded and any_msg_contains can see it
     fn simple_any_msg_contains() {
         let handle = get_handle();
-        let num_recs = handle.list.len();
+        let num_recs = handle.list.count();
         info!("logging message");
-        assert!(handle.list.len() > num_recs);
+        assert!(handle.list.count() > num_recs);
         assert!(handle.any_msg_contains("logging message"));
     }
 
