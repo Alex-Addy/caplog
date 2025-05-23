@@ -60,8 +60,6 @@ extern crate lazy_static;
 
 use std::sync::Arc;
 
-use boxcar;
-
 lazy_static! {
     static ref _CAPTURE_LOG: Box<Caplog> = {
         let handler = Box::new(Caplog {
@@ -129,7 +127,12 @@ impl CaplogHandle {
     pub fn iter(&self) -> Box<dyn Iterator<Item = (usize, &Record)> + '_> {
         match self.stop_idx {
             None => Box::new(self.list.iter().skip(self.start_idx)),
-            Some(stop_idx) => Box::new(self.list.iter().skip(self.start_idx).take(stop_idx-self.start_idx)),
+            Some(stop_idx) => Box::new(
+                self.list
+                    .iter()
+                    .skip(self.start_idx)
+                    .take(stop_idx - self.start_idx),
+            ),
         }
     }
 
@@ -215,5 +218,27 @@ mod tests {
         trace!("{}", message);
         handle.stop_recording();
         assert!(handle.any_msg_contains(message));
+    }
+
+    #[test]
+    /// Verify that separate handles with different stop and start indexes works correctly.
+    fn verify_concurrent_handles() {
+        let messages = ["zero", "one", "two"];
+        let full_handle = get_handle();
+        warn!("{}", messages[0]);
+        let mut partial_handle = get_handle();
+        warn!("{}", messages[1]);
+        partial_handle.stop_recording();
+        warn!("{}", messages[2]);
+
+        // only full should have first message
+        assert!(full_handle.any_msg_contains(messages[0]));
+        assert!(!partial_handle.any_msg_contains(messages[0]));
+        // both handles should have second
+        assert!(full_handle.any_msg_contains(messages[1]));
+        assert!(partial_handle.any_msg_contains(messages[1]));
+        // only full should have final message
+        assert!(full_handle.any_msg_contains(messages[2]));
+        assert!(!partial_handle.any_msg_contains(messages[2]));
     }
 }
